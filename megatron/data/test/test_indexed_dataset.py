@@ -90,7 +90,7 @@ def main():
     group = parser.add_argument_group(title='tokenizer')
     group.add_argument('--tokenizer-type', type=str, required=True,
                        choices=['BertWordPieceLowerCase',
-                                'GPT2BPETokenizer'],
+                                'GPT2BPETokenizer', 'LLAMATokenizer'],
                        help='What type of tokenizer to use.')
     group.add_argument('--vocab-file', type=str, default=None,
                        help='Path to the vocab file')

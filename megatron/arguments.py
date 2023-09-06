@@ -493,6 +493,8 @@ def _add_moe_args(parser):
     group.add_argument('--moe-expert-model-parallelism', action='store_true',
                        default=False, help='Enable expert model paralleism within'
                        ' the data parallel group')
+    group.add_argument('--moe-weight-parallelism', action='store_true',
+                       default=False, help='appling ZeRO on the data parallel process group of the MoE layer')
     return parser
 
 
@@ -990,7 +992,8 @@ def _add_data_args(parser):
                        choices=['BertWordPieceLowerCase',
                                 'BertWordPieceCase',
                                 'GPT2BPETokenizer',
-                                'SentencePieceTokenizer'],
+                                'SentencePieceTokenizer',
+                                'LLAMATokenizer'],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')

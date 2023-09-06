@@ -191,8 +191,15 @@ class _MegablocksAdapter(MegatronModule):
         # parallel sharding and data parallel sharding could be decoupled
         # by extending the optimizer to handle data parallel reductions for
         # MoE and non-MoE parameters separately.
+        
+        assert (args.moe_expert_model_parallelism and args.moe_weight_parallelism) == False, \
+            "moe_expert_model_parallelism and moe_weight_parallelism shall not used togather."
+        
         if args.moe_expert_model_parallelism:
             args.expert_parallel_group = parallel_state.get_data_parallel_group()
+            
+        if args.moe_weight_parallelism:
+            args.weight_parallel_group = parallel_state.get_data_parallel_group()
         self.moe = layer_cls(args)
 
     def forward(self, x):
@@ -708,6 +715,7 @@ class ParallelTransformerLayer(MegatronModule):
 
         # MLP
         mlp_cls = ParallelMLP
+        
         if args.moe_num_experts is not None:
             if args.moe_use_megatron_switch:
                 mlp_cls = SwitchMLP
@@ -715,6 +723,7 @@ class ParallelTransformerLayer(MegatronModule):
                 mlp_cls = MoE
             else:
                 mlp_cls = dMoE
+        
         self.mlp = mlp_cls(init_method, output_layer_init_method)
 
         # Set bias+dropout+add fusion grad_enable execution handler.
