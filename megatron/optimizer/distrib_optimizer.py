@@ -12,7 +12,7 @@ from megatron import print_rank_0
 from megatron.core import mpu, tensor_parallel
 from megatron.model.module import param_is_not_shared
 
-from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
+from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper, _multi_tensor_copy_this_to_that
 
 
 class Range:
@@ -388,7 +388,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         for model_index, model in enumerate(self.models):
             current_param_buffers = {}
             for dtype, grad_buffer in model._grad_buffers.items():
-                param_buffer = torch.tensor(grad_buffer.data.storage()._untyped(),
+                try:
+                    storage = grad_buffer.data.storage()._untyped()
+                except:
+                    storage = grad_buffer.data.storage().untyped()
+                param_buffer = torch.tensor(storage,
                                             dtype = params_dtype,
                                             device = grad_buffer.data.device)
                 param_buffer = param_buffer[:grad_buffer.numel_padded]
@@ -717,3 +721,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                           self.model_float16_groups)
         copy_group_params(self.shard_fp32_groups,
                           self.model_fp32_groups)
+
+    def _copy_model_params_to_main_params(self):
+        # NOTE: this is an unofficial implementation and may have bugs.
+        # Only needed for the float16 params.
+        model_data, main_data = self._get_model_and_main_params_data_float16()
+        _multi_tensor_copy_this_to_that(this=model_data, that=main_data,
+                                        overflow_buf=self._dummy_overflow_buf)

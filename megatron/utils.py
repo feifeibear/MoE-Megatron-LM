@@ -211,3 +211,48 @@ def print_rank_last(message):
             print(message, flush=True)
     else:
         print(message, flush=True)
+
+
+def get_flops(args, iter_time_s, batch_size) -> float:
+    if args.moe_num_experts is not None:
+        # NOTE() we do not consider drop tokens
+        ff = (args.overall_no_mlp_params + args.overall_mlp_params / args.moe_num_experts * args.moe_top_k) * 6
+    else:
+        ff = args.total_params * 6
+    attn = args.seq_length * args.hidden_size * args.num_layers * 12
+    flops = (
+        batch_size
+        * args.seq_length
+        * (ff + attn)
+        / (iter_time_s * args.world_size)
+    )
+    return flops
+
+def human_readable_flops(num) -> str:
+    for unit in [
+        " ",
+        " KFLOPS",
+        " MFLOPS",
+        " GFLOPS",
+        " TFLOPS",
+        " PFLOPS",
+        " EFLOPS",
+        " ZFLOPS",
+    ]:
+        if abs(num) < 1000.0:
+            return "%3.1f%s" % (num, unit)
+        num /= 1000.0
+    return "%.1f%s" % (num, "Yi")
+
+def human_readable_params(num) -> str:
+    for unit in [
+        " ",
+        " K",
+        " M",
+        " B",
+        " T",
+    ]:
+        if abs(num) < 1000.0:
+            return "%3.1f%s" % (num, unit)
+        num /= 1000.0
+    return "%.1f%s" % (num, "Yi")

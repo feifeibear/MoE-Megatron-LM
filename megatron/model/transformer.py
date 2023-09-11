@@ -725,6 +725,9 @@ class ParallelTransformerLayer(MegatronModule):
                 mlp_cls = dMoE
         
         self.mlp = mlp_cls(init_method, output_layer_init_method)
+        mlp_params = sum([p.nelement() for p in self.mlp.parameters()])
+        print(f"initialize mlp cls {mlp_cls}, moe_num_experts {args.moe_num_experts} {mlp_params/1e9} B")
+        args.mlp_params = mlp_params
 
         # Set bias+dropout+add fusion grad_enable execution handler.
         TORCH_MAJOR = int(torch.__version__.split('.')[0])

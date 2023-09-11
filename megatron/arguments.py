@@ -495,6 +495,10 @@ def _add_moe_args(parser):
                        ' the data parallel group')
     group.add_argument('--moe-weight-parallelism', action='store_true',
                        default=False, help='appling ZeRO on the data parallel process group of the MoE layer')
+    group.add_argument('--trace-log-dir', type=str, default="./profile_dir",
+                       help='pytorch profiler tracing output directories')
+    group.add_argument('--use-torch-profiler', action='store_true',
+                       default=False, help='use torch profiler to trace 20 iterations')
     return parser
 
 

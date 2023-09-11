@@ -10,6 +10,7 @@ import time
 _TRAIN_START_TIME = time.time()
 import torch
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
+from torch.profiler import ProfilerActivity
 
 from megatron import get_args
 from megatron import get_signal_handler
@@ -40,7 +41,10 @@ from megatron.utils import calc_params_l2_norm
 from megatron.schedules import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
+from megatron.utils import human_readable_params
+from megatron.utils import get_flops, human_readable_flops
 
+import wandb
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -289,6 +293,36 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     if args.fp16 or args.bf16:
         model = [Float16Module(model_module, args) for model_module in model]
 
+
+    # Print number of parameters.
+    if mpu.get_data_parallel_rank() == 0:
+        params = sum([sum([p.nelement() for p in model_module.parameters()])
+                 for model_module in model])
+        print(' > number of parameters on (tensor, pipeline) '
+              'model parallel rank ({}, {}): {}'.format(
+            mpu.get_tensor_model_parallel_rank(),
+            mpu.get_pipeline_model_parallel_rank(),
+            params), flush=True)
+    else: 
+        params = 0
+
+    total_n_parameters = torch.tensor([params]).cuda(torch.cuda.current_device())
+    torch.distributed.all_reduce(total_n_parameters)
+    args.total_params = total_n_parameters.item()
+    
+    # calibrate for MoE
+    if args.moe_weight_parallelism and args.moe_expert_model_parallelism:
+        # ZeRO or EP
+        args.overall_no_mlp_params  = args.total_params - args.mlp_params * args.num_layers
+        args.overall_mlp_params = args.mlp_params * args.num_layers * mpu.get_data_parallel_world_size()
+    
+    else:
+        args.overall_no_mlp_params  = args.total_params - args.mlp_params * args.num_layers
+        args.overall_mlp_params = args.mlp_params * args.num_layers
+    
+    args.total_params = args.overall_no_mlp_params + args.overall_mlp_params
+    print(f"total_params {args.total_params/1e9} B")
+ 
     if wrap_with_ddp:
         if args.DDP_impl == 'torch':
             i = torch.cuda.current_device()
@@ -573,40 +607,90 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     if args.log_timers_to_tensorboard and \
        (iteration % args.tensorboard_log_interval == 0):
         timers.write(timers_to_log, writer, iteration,
-                     normalizer=total_iterations)
+                     normalizer=total_iterations, args=args)
     if writer and (iteration % args.tensorboard_log_interval == 0):
         if args.log_learning_rate_to_tensorboard:
-            writer.add_scalar('learning-rate', learning_rate, iteration)
-            writer.add_scalar('learning-rate vs samples', learning_rate,
+
+            writer.add_scalar('learning-rate', 
+                              learning_rate, 
+                              iteration)
+            writer.add_scalar('learning-rate vs samples', 
+                              learning_rate,
                               args.consumed_train_samples)
+            writer.add_scalar('learning-rate vs tokens', 
+                              learning_rate,
+                              args.consumed_train_samples * args.seq_length)
+            
         if args.log_batch_size_to_tensorboard:
-            writer.add_scalar('batch-size', batch_size, iteration)
-            writer.add_scalar('batch-size vs samples', batch_size,
+            writer.add_scalar('batch-size', 
+                              batch_size, 
+                              iteration)
+            writer.add_scalar('batch-size vs samples', 
+                              batch_size,
                               args.consumed_train_samples)
+            writer.add_scalar('batch-size vs tokens', 
+                              batch_size,
+                              args.consumed_train_samples * args.seq_length)
         for key in loss_dict:
-            writer.add_scalar(key , loss_dict[key], iteration)
-            writer.add_scalar(key + ' vs samples', loss_dict[key],
+            writer.add_scalar(key , 
+                              loss_dict[key], 
+                              iteration)
+            writer.add_scalar(key + ' vs samples', 
+                              loss_dict[key],
                               args.consumed_train_samples)
+            writer.add_scalar(key + ' vs tokens', 
+                              loss_dict[key],
+                              args.consumed_train_samples * args.seq_length)
         if args.log_loss_scale_to_tensorboard:
-            writer.add_scalar('loss-scale', loss_scale, iteration)
-            writer.add_scalar('loss-scale vs samples', loss_scale,
+            writer.add_scalar('loss-scale', 
+                              loss_scale, 
+                              iteration)
+            writer.add_scalar('loss-scale vs samples', 
+                              loss_scale,
                               args.consumed_train_samples)
+            writer.add_scalar('loss-scale vs tokens', 
+                              loss_scale,
+                            args.consumed_train_samples * args.seq_length)
         if args.log_world_size_to_tensorboard:
-            writer.add_scalar('world-size', args.world_size, iteration)
-            writer.add_scalar('world-size vs samples', args.world_size,
+            writer.add_scalar('world-size', 
+                              args.world_size, 
+                              iteration)
+            writer.add_scalar('world-size vs samples', 
+                              args.world_size,
                               args.consumed_train_samples)
+            writer.add_scalar('world-size vs tokens', 
+                              args.world_size,
+                              args.consumed_train_samples * args.seq_length)
         if grad_norm is not None:
-            writer.add_scalar('grad-norm', grad_norm, iteration)
-            writer.add_scalar('grad-norm vs samples', grad_norm,
+            writer.add_scalar('grad-norm', 
+                              grad_norm, 
+                              iteration)
+            writer.add_scalar('grad-norm vs samples', 
+                              grad_norm,
                               args.consumed_train_samples)
+            writer.add_scalar('grad-norm vs tokens', 
+                              grad_norm,
+                              args.consumed_train_samples * args.seq_length)
         if num_zeros_in_grad is not None:
-            writer.add_scalar('num-zeros', num_zeros_in_grad, iteration)
-            writer.add_scalar('num-zeros vs samples', num_zeros_in_grad,
+            writer.add_scalar('num-zeros-in-grad', 
+                              num_zeros_in_grad, 
+                              iteration)
+            writer.add_scalar('num-zeros-in-grad vs samples', 
+                              num_zeros_in_grad,
                               args.consumed_train_samples)
+            writer.add_scalar('num-zeros-in-grad vs tokens', 
+                              num_zeros_in_grad,
+                              args.consumed_train_samples * args.seq_length)
         if params_norm is not None:
-            writer.add_scalar('params-norm', params_norm, iteration)
-            writer.add_scalar('params-norm vs samples', params_norm,
+            writer.add_scalar('params-norm', 
+                              params_norm, 
+                              iteration)
+            writer.add_scalar('params-norm vs samples', 
+                              params_norm,
                               args.consumed_train_samples)
+            writer.add_scalar('params-norm vs tokens', 
+                              params_norm,
+                              args.consumed_train_samples * args.seq_length)
         if args.log_memory_to_tensorboard:
             mem_stats = torch.cuda.memory_stats()
             writer.add_scalar(
@@ -625,19 +709,172 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                 iteration,
             )
 
+    if hasattr(args, 'wandb_dir') and \
+        args.wandb_dir and \
+        args.rank == (args.world_size - 1) and \
+        iteration % args.tensorboard_log_interval == 0:
+
+        wandb.log({'misc/steps-to-samples': 
+                    args.consumed_train_samples}, 
+                    step=iteration)
+
+        wandb.log({'misc/steps-to-tokens': 
+                    args.consumed_train_samples * args.seq_length}, 
+                    step=iteration)
+
+        if args.log_learning_rate_to_tensorboard:
+            wandb.log({'train/learning-rate': 
+                       learning_rate}, 
+                       step=iteration)
+
+        if args.log_batch_size_to_tensorboard:
+            wandb.log({'misc/batch-size': 
+                       batch_size},
+                       step=iteration)
+
+        for key in loss_dict:
+            wandb.log({'train/' + key: 
+                       loss_dict[key]},
+                       step=iteration)
+            
+        if args.log_loss_scale_to_tensorboard:
+            wandb.log({'train/loss-scale': 
+                       loss_scale},
+                       step=iteration)
+
+        if args.log_world_size_to_tensorboard:
+            wandb.log({'misc/world-size': 
+                       args.world_size},
+                       step=iteration)
+
+        if grad_norm is not None:
+            wandb.log({'train/grad-norm': 
+                       grad_norm},
+                       step=iteration)
+
+        if num_zeros_in_grad is not None:
+            wandb.log({'train/num-zeros-in-grad': 
+                       num_zeros_in_grad},
+                       step=iteration)
+
+        if params_norm is not None:
+            wandb.log({'train/params-norm': 
+                       params_norm},
+                       step=iteration)
+
+        if args.log_memory_to_tensorboard:
+            mem_stats = torch.cuda.memory_stats()
+            wandb.log({'misc/mem-reserved-bytes': 
+                       mem_stats["reserved_bytes.all.current"]},
+                       step=iteration)
+            wandb.log({'misc/mem-allocated-bytes': 
+                       mem_stats["allocated_bytes.all.current"]},
+                       step=iteration)
+            wandb.log({'misc/mem-allocated-count': 
+                       mem_stats["allocation.all.current"]},
+                       step=iteration)
+
+        if hasattr(args, 'wandb_dir') and \
+        args.wandb_dir and \
+        args.rank == (args.world_size - 1):
+            # wechat notification
+            if iteration % args.wechatbot_push_interval == 0 and args.webhook != '':
+                # send msg to wework bot
+                from megatron.wechat_notify import wechat_notify
+                api = wandb.Api()
+                wechat_notify(api, 'compute-usage/mfu', iteration, args.webhook, wandb_project = args.wandb_project)
+    
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed(barrier=True)
         elapsed_time_per_iteration = elapsed_time / total_iterations
+        eta = ((args.train_iters - iteration) * elapsed_time_per_iteration) / 3600
+
+        log_string = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] | "
+                
+        log_string += ' iteration {:8d}/{:8d} |'.format(iteration, args.train_iters)
+        
+        log_string += ' consumed batches / samples: {} |'.format(
+            human_readable_params(args.consumed_train_samples))
+
+        log_string += ' consumed tokens: {} |'.format(
+            human_readable_params(args.consumed_train_samples * args.seq_length))
+        
+        log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(elapsed_time_per_iteration * 1000.0)
+
+        tokens_per_sec_per_gpu = (args.seq_length * batch_size) / args.world_size / elapsed_time_per_iteration
+        log_string += ' tokens / sec / gpu: {:.1f} |'.format(tokens_per_sec_per_gpu)
+                
+        log_string += ' eta (h): {:.1f} |'.format(eta)
+
+        log_string += ' eta (d): {:.1f} |'.format(eta / 24)
+        
+        log_string += ' total params: {} |'.format(human_readable_params(args.total_params))
+        
+        flops = get_flops(args, elapsed_time_per_iteration, batch_size)
+        log_string += ' approx flops per gpu: {} |'.format(human_readable_flops(flops))
+
+        mfu = flops / 312e12 * 100
+        log_string += ' approx mfu: {:.1f} |'.format(mfu)
+
         if writer:
             if args.log_timers_to_tensorboard:
+
                 writer.add_scalar('iteration-time',
-                                  elapsed_time_per_iteration, iteration)
-        log_string = ' iteration {:8d}/{:8d} |'.format(
-            iteration, args.train_iters)
-        log_string += ' consumed samples: {:12d} |'.format(
-            args.consumed_train_samples)
-        log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
-            elapsed_time_per_iteration * 1000.0)
+                                  elapsed_time_per_iteration, 
+                                  iteration)
+                writer.add_scalar('eta',
+                                  eta, 
+                                  iteration)
+                writer.add_scalar('iteration-time vs samples',
+                                  elapsed_time_per_iteration, 
+                                  args.consumed_train_samples)
+                writer.add_scalar('iteration-time vs tokens',
+                                  elapsed_time_per_iteration, 
+                                  args.consumed_train_samples * args.seq_length)
+                
+                writer.add_scalar('tflops',
+                                  flops / 1e12, 
+                                  iteration)
+                writer.add_scalar('tflops vs samples',
+                                  flops / 1e12, 
+                                  args.consumed_train_samples)
+                writer.add_scalar('tflops vs tokens',
+                                  flops / 1e12, 
+                                  args.consumed_train_samples * args.seq_length)
+                
+                writer.add_scalar('mfu',
+                                  mfu,
+                                  iteration)
+                writer.add_scalar('mfu vs samples',
+                                  mfu,
+                                  args.consumed_train_samples)
+                writer.add_scalar('mfu vs tokens',
+                                  mfu,
+                                  args.consumed_train_samples * args.seq_length)
+            
+                if hasattr(args, 'wandb_dir') and \
+                    args.wandb_dir and \
+                    args.rank == (args.world_size - 1):
+
+                    wandb.log({'runtime/iteration-time': 
+                               elapsed_time_per_iteration},
+                               step=iteration)
+                    wandb.log({'runtime/eta': 
+                               eta},
+                               step=iteration)
+                    wandb.log({'runtime/eta (d)': 
+                               eta / 24},
+                               step=iteration)
+                    wandb.log({'runtime/tokens_per_sec_per_gpu': 
+                               tokens_per_sec_per_gpu},
+                               step=iteration)
+                    wandb.log({'compute-usage/tflops': 
+                               flops / 1e12},
+                               step=iteration)
+                    wandb.log({'compute-usage/mfu': 
+                               mfu},
+                               step=iteration)
+
         log_string += ' learning rate: {:.3E} |'.format(learning_rate)
         log_string += ' global batch size: {:5d} |'.format(batch_size)
         for key in total_loss_dict:
@@ -705,15 +942,46 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
     report_memory_flag = True
+    
+
+    if args.use_torch_profiler:
+        profile_filename = f"./train_profile/${args.trace_log_dir}/trace-E{args.moe_num_experts}-top{args.moe_top_k}"\
+            f"-ep{args.moe_expert_model_parallelism}-wp{args.moe_weight_parallelism}-tp{args.tensor_model_parallel_size}-zero{args.use_distributed_optimizer}"\
+            f"-sp{args.sequence_parallel}"
+        
+        prof_ctx = torch.profiler.profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(wait=0, warmup=0, active=10, repeat=1, skip_first=2),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_filename),
+            # record_shapes=True,
+            profile_memory=True,
+            use_cuda=True,
+            # with_stack=True
+        )
+        
+        prof_step = 20
+
+        
     while iteration < args.train_iters:
         update_num_microbatches(args.consumed_train_samples)
         args.curr_iteration = iteration
+        
+        if args.use_torch_profiler and iteration == 0:
+            prof_ctx.__enter__() 
+            
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
                        train_data_iterator,
                        model,
                        optimizer,
                        opt_param_scheduler)
+        
+        if args.use_torch_profiler:
+            if iteration < prof_step:
+                prof_ctx.step()
+            elif iteration == prof_step:
+                prof_ctx.__exit__(None, None, None)
+                
         iteration += 1
         args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
                                        args.micro_batch_size * \
