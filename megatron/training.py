@@ -303,25 +303,40 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             mpu.get_tensor_model_parallel_rank(),
             mpu.get_pipeline_model_parallel_rank(),
             params), flush=True)
-    else: 
-        params = 0
-
-    total_n_parameters = torch.tensor([params]).cuda(torch.cuda.current_device())
-    torch.distributed.all_reduce(total_n_parameters)
-    args.total_params = total_n_parameters.item()
     
-    # calibrate for MoE
-    if args.moe_weight_parallelism and args.moe_expert_model_parallelism:
-        # ZeRO or EP
-        args.overall_no_mlp_params  = args.total_params - args.mlp_params * args.num_layers
-        args.overall_mlp_params = args.mlp_params * args.num_layers * mpu.get_data_parallel_world_size()
-    
+        no_mlp_params = params - args.mlp_params * args.num_layers
+       
+       
     else:
-        args.overall_no_mlp_params  = args.total_params - args.mlp_params * args.num_layers
-        args.overall_mlp_params = args.mlp_params * args.num_layers
+        no_mlp_params = 0
+        
     
-    args.total_params = args.overall_no_mlp_params + args.overall_mlp_params
-    print(f"total_params {args.total_params/1e9} B")
+    # one process calcuates the overall mlp parameter numbers.
+    if torch.distributed.get_rank() == 0:
+        if mpu.get_data_parallel_world_size() >= args.moe_num_experts:
+            if args.moe_weight_parallelism or args.moe_expert_model_parallelism:
+                 # GPU number >= Expert number using TP or ZeRO
+                mlp_params = args.mlp_params * args.num_layers * mpu.get_data_parallel_world_size()
+            else:
+                 # GPU number >= Expert number not using TP neither ZeRO. It use DP for experts.
+                mlp_params = args.mlp_params * args.num_layers * args.moe_num_experts
+        else:
+            # GPU number < Expert number (args.moe_num_experts), expert replica
+            mlp_params = args.mlp_params * args.num_layers * mpu.get_data_parallel_world_size()
+    else:
+        mlp_params = 0
+
+    # only reduce the no-MoE part
+    total_no_mlp_params = torch.tensor([no_mlp_params]).cuda(torch.cuda.current_device())
+    total_mlp_params = torch.tensor([mlp_params]).cuda(torch.cuda.current_device())
+    
+    torch.distributed.all_reduce(total_no_mlp_params)
+    torch.distributed.all_reduce(total_mlp_params)
+    args.total_no_mlp_params = total_no_mlp_params.item()
+    args.total_mlp_params = total_mlp_params.item()
+        
+    args.total_params = args.total_no_mlp_params + args.total_mlp_params
+    print(f"total_params {args.total_params/1e9} B, total_no_mlp_params {args.total_no_mlp_params/1e9} B, total_mlp_params {args.total_mlp_params/1e9} B")
  
     if wrap_with_ddp:
         if args.DDP_impl == 'torch':
