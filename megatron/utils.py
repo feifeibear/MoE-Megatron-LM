@@ -216,7 +216,7 @@ def print_rank_last(message):
 def get_flops(args, iter_time_s, batch_size) -> float:
     if args.moe_num_experts is not None:
         # NOTE() we do not consider drop tokens
-        ff = (args.overall_no_mlp_params + args.overall_mlp_params / args.moe_num_experts * args.moe_top_k) * 6
+        ff = (args.total_no_mlp_params + args.total_mlp_params / args.moe_num_experts * args.moe_top_k) * 6
     else:
         ff = args.total_params * 6
     attn = args.seq_length * args.hidden_size * args.num_layers * 12
